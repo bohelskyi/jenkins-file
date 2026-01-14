@@ -1,54 +1,79 @@
 pipeline {
     agent any
-    environment {
-        REMOTE_HOST = '192.168.56.101' 
-        REMOTE_USER = 'bohelskyi'
+
+    parameters {
+        string(name: 'REMOTE_HOST', defaultValue: '192.168.56.101', description: 'IP address of the Target VM')
+        string(name: 'REMOTE_USER', defaultValue: 'bohelskyi', description: 'SSH user for the Target VM')
+        string(name: 'SSH_CRED_ID', defaultValue: 'target-server-ssh-key', description: 'Jenkins Credentials ID for SSH key')
     }
 
     stages {
-        stage('Check Connectivity') {
+        stage('Environment Setup') {
             steps {
-                echo "Checking connection to ${REMOTE_HOST}..."
-                sh "ssh -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} 'uptime'"
+                script {
+                    echo "Preparing to deploy to ${params.REMOTE_USER}@${params.REMOTE_HOST}"
+                }
             }
         }
 
-        stage('Install Apache2') {
+        stage('Infrastructure Management') {
             steps {
-                echo "Installing Apache on remote machine..."
-                sh """
-                    ssh ${REMOTE_USER}@${REMOTE_HOST} '
-                        sudo apt-get update && \
-                        sudo apt-get install -y apache2 && \
-                        sudo systemctl enable apache2 && \
-                        sudo systemctl start apache2
-                    '
-                """
+                // Використовуємо плагін SSH Agent для безпечного керування ключами
+                sshagent([params.SSH_CRED_ID]) {
+                    sh """
+                        ssh -o StrictHostKeyChecking=no ${params.REMOTE_USER}@${params.REMOTE_HOST} '
+                            echo "--- System Health Check ---"
+                            uptime
+                            
+                            echo "--- Ensuring Apache2 Installation ---"
+                            sudo apt-get update
+                            sudo apt-get install -f -y
+                            sudo apt-get install -y apache2
+                            
+                            echo "--- Service Management ---"
+                            sudo systemctl enable apache2
+                            sudo systemctl start apache2
+                        '
+                    """
+                }
             }
         }
-        
-        stage('Verify Web Server') {
+
+        stage('Quality Assurance (QA)') {
             steps {
-                echo "Verifying installation..."
-                sh "curl -sI http://${REMOTE_HOST} | grep HTTP"
+                echo "Running Health Check..."
+                sh "curl -sI http://${params.REMOTE_HOST} | grep HTTP"
             }
         }
-        
-        stage('Check Apache Logs') {
+
+        stage('Log Analysis & Monitoring') {
             steps {
-                echo "Analyzing access logs for 4xx and 5xx errors..."
-                sh """
-                    ssh ${REMOTE_USER}@${REMOTE_HOST} "
-                        if sudo test -f /var/log/apache2/access.log; then
-                            echo '--- Found Error Logs ---'
-                            sudo grep -E ' [45][0-9][0-9] ' /var/log/apache2/access.log || echo 'No 4xx or 5xx errors found.'
-                        else
-                            echo 'Log file not found or inaccessible!'
-                            exit 1
-                        fi
-                    "
-                """
+                sshagent([params.SSH_CRED_ID]) {
+                    sh """
+                        ssh ${params.REMOTE_USER}@${params.REMOTE_HOST} "
+                            if sudo test -f /var/log/apache2/access.log; then
+                                echo '--- Analyzing Security/Error Logs ---'
+                                sudo grep -E ' [45][0-9][0-9] ' /var/log/apache2/access.log || echo 'Clean: No 4xx/5xx errors.'
+                            else
+                                echo 'Error: Critical log file missing!'
+                                exit 1
+                            fi
+                        "
+                    """
+                }
             }
+        }
+    }
+
+    post {
+        success {
+            echo "Deployment Successful on ${params.REMOTE_HOST}!"
+        }
+        failure {
+            echo "Deployment Failed! Please check the logs above."
+        }
+        always {
+            cleanWs() // Очищення робочої директорії після завершення
         }
     }
 }
